@@ -1,0 +1,357 @@
+#!/usr/bin/env pybricks-micropython
+from pybricks.hubs import EV3Brick
+from pybricks.ev3devices import Motor, GyroSensor
+from pybricks.parameters import Port, Stop, Button
+from pybricks.tools import wait, StopWatch
+from pybricks.robotics import DriveBase
+from pixycamev3.pixy2 import Pixy2
+import json
+import os
+
+# Setup
+ev3 = EV3Brick()
+gMotor = Motor(Port.A)
+leftMotor = Motor(Port.B)
+rightMotor = Motor(Port.C)
+sMotor = Motor(Port.D)
+gyroSensor = GyroSensor(Port.S1)
+gyroSensor.reset_angle(0)
+pixy2 = Pixy2(port=2, i2c_address=0x54)
+robot = DriveBase(leftMotor, rightMotor, wheel_diameter=80, axle_track=104)
+
+# Signature definitions
+ORANGE_SIG = 2
+PURPLE_SIG = 1
+BLUE_SIG = 3
+
+ballOrange = False
+ballPurple = False
+purpleDetected = False
+isFull = False
+
+gobbler_home = sMotor.angle()
+gobbler_close = gobbler_home + 90
+sMotor.hold()
+
+globalTime = StopWatch()
+globalTime.reset()
+
+matchEndTime = 105000  # 1 minute 45 seconds in milliseconds
+
+# ------------------ Pixy2 Detection Functions ------------------ #
+
+def detectOrangeBall():
+    """Check if orange ball is detected"""
+    nr_blocks, blocks = pixy2.get_blocks(ORANGE_SIG, 1)
+    return nr_blocks > 0
+
+def detectPurpleBall():
+    """Check if purple ball is detected"""
+    nr_blocks, blocks = pixy2.get_blocks(PURPLE_SIG, 1)
+    return nr_blocks > 0
+
+def detectAnyBall():
+    """Check if any ball (orange or purple) is detected"""
+    return detectOrangeBall() or detectPurpleBall()
+
+def checkColor():
+    """
+    Check what color ball is detected using Pixy2
+    Returns: "orange", "purple", or "none"
+    """
+    if detectOrangeBall():
+        return "orange"
+    elif detectPurpleBall():
+        return "purple"
+    else:
+        return "none"
+
+# ------------------ Mechanik & Bewegung ------------------ #
+
+def PowerGobbler(isForward : bool):
+    if isFull:
+        return
+    if isForward:
+        sMotor.run(1000)
+    else:
+        sMotor.run(-1000)
+
+def gobblerOpen():
+    sMotor.stop()
+    sMotor.run_target(600, gobbler_home)
+    sMotor.hold()
+
+def gobblerClose():
+    sMotor.stop()
+    sMotor.run_target(600, gobbler_close)
+    sMotor.hold()
+
+def shoot():
+    gobblerOpen()
+    gMotor.run_target(1000, -45, Stop.HOLD)
+    wait(500)
+    gMotor.run_target(600, 45, Stop.HOLD)
+
+def drive_straight_gyro(targetAngle, driveSpeed, distance_cm):
+    robot.reset()
+    correctionSpeed = 750
+    while abs(robot.distance()) < abs(distance_cm):
+        gyroAngle = gyroSensor.angle()
+        error = targetAngle - gyroAngle
+        df = 1.5 * (error / 90) - 0.5 * ((error / 90) ** 3)
+        leftSpeed = driveSpeed - correctionSpeed * df
+        rightSpeed = driveSpeed + correctionSpeed * df
+        leftMotor.run(leftSpeed)
+        rightMotor.run(rightSpeed)
+        wait(10)
+    stop_motors()
+
+def drive_until_blue(targetAngle=0, driveSpeed=300):
+    """
+    Drives straight (with gyro) until Pixy2 sees a blue object (signature 3).
+    """
+    correctionSpeed = 750
+    robot.reset()
+
+    while True:
+        # Check for blue ball (signature 3)
+        nr_blocks, _ = pixy2.get_blocks(BLUE_SIG, 1)
+        if nr_blocks > 0:
+            ev3.screen.print("Blue found!")
+            break
+
+        # Gyro correction
+        gyroAngle = gyroSensor.angle()
+        error = targetAngle - gyroAngle
+        df = 1.5 * (error / 90) - 0.5 * ((error / 90) ** 3)
+
+        leftSpeed = driveSpeed - correctionSpeed * df
+        rightSpeed = driveSpeed + correctionSpeed * df
+        leftMotor.run(leftSpeed)
+        rightMotor.run(rightSpeed)
+        wait(10)
+
+    stop_motors()
+
+def turn_to_angle(target_angle, speed=200):
+    """Turns robot to an absolute angle using the gyro sensor."""
+    tolerance = 2  # degrees
+    max_speed = abs(speed)
+    min_speed = 40  # to avoid stalling
+
+    while True:
+        current_angle = gyroSensor.angle()
+        error = target_angle - current_angle
+
+        if abs(error) <= tolerance:
+            break
+
+        # Simple proportional control
+        turn_speed = int(3 * error)
+
+        # Limit speed
+        turn_speed = max(min(turn_speed, max_speed), -max_speed)
+
+        # Ensure it's not too slow
+        if 0 < abs(turn_speed) < min_speed:
+            turn_speed = min_speed * (1 if turn_speed > 0 else -1)
+
+        leftMotor.run(-turn_speed)
+        rightMotor.run(turn_speed)
+
+        wait(10)
+
+    stop_motors()
+
+
+def stop_motors():
+    leftMotor.stop(Stop.BRAKE)
+    rightMotor.stop(Stop.BRAKE)
+
+# ------------------ Hauptlogik ------------------ #
+
+def SortStartBalls():
+    global purpleDetected, ballPurple, ballOrange
+
+    drive_straight_gyro(0, 460, 315)
+    stop_motors()
+    color_result = checkColor()
+    wait(3000)
+
+    if color_result == "orange":
+        ev3.screen.print("Orange")
+        wait(1000)
+        ev3.speaker.beep()
+        wait(100)
+        ev3.speaker.beep()
+        ballOrange = True
+        PowerGobbler(False)
+        drive_straight_gyro(0,400,150)
+        wait(1000)
+        sMotor.stop()
+        drive_straight_gyro(0,-80,150)
+        turn_to_angle(90)
+        drive_straight_gyro(90,400,200)
+        gobblerClose()
+        checkColor()
+        wait(3000)
+        color2_result = checkColor()
+
+        if color2_result == "orange":
+            ev3.screen.print("Orange2")
+            PowerGobbler(False)
+            drive_straight_gyro(90, 600, 400)
+            sMotor.stop()
+            gobblerClose()
+            turn_to_angle(-90)
+            rightMotor.run(500)
+            wait(2000)
+            rightMotor.stop()
+            turn_to_angle(-90)
+            drive_straight_gyro(120, 800, 400)
+            drive_straight_gyro(120, -800, 100)
+            turn_to_angle(-90)
+            drive_until_blue()  # blue zone
+
+        elif color2_result == "purple":
+            ev3.screen.print("Lila2")
+            ballPurple = True
+            purpleDetected = True
+
+            gobblerClose()
+            turn_to_angle(90)
+            drive_straight_gyro(180, 800, 400)  # drop purple
+            drive_straight_gyro(180, -80, 100)
+            turn_to_angle(-180)
+            PowerGobbler()
+            drive_until_blue()  # blue zone
+
+    elif color_result == "purple":
+        ev3.screen.print("Lila")
+        ev3.speaker.beep()
+        ballPurple = True
+        purpleDetected = True
+        gobblerClose()
+        turn_to_angle(120)
+        drive_straight_gyro(120, 800, 500)
+        drive_straight_gyro(120, -600, 100)
+        turn_to_angle(-120)
+        PowerGobbler(False)
+        drive_straight_gyro(0, 800, 300)
+        rightMotor.run(600)
+        wait(2500)
+        rightMotor.stop()
+        gobblerClose()
+        turn_to_angle(90)
+        drive_until_blue()
+
+    else:
+        ev3.screen.print("Keine Farbe")
+        PowerGobbler(False)
+        drive_straight_gyro(0, 800, 200)
+        sMotor.stop()
+        turn_to_angle(-120)
+        drive_straight_gyro(-120, 600, 250)
+
+        checkColor()
+        wait(1000)
+        color3_result = checkColor()
+
+        if color3_result == "orange":
+            turn_to_angle(-10)
+            PowerGobbler(False)
+            drive_straight_gyro(-130,500,200)
+            drive_straight_gyro(-130,-80,50)
+            gobblerClose()
+            turn_to_angle(-90)
+            rightMotor.run(500)
+            wait(5000)
+            rightMotor.stop()
+            drive_straight_gyro(0,800,350)
+            
+
+
+
+        elif color3_result == "purple":
+            pass
+
+
+def midGameLoop():
+    seeBlue = False
+
+    drive_straight_gyro(0, -100, 1000) #Zuruck zur wand
+    #
+    # Erzaets mit reset pos
+    #
+
+    drive_straight_gyro(0, 600, 50)
+    turn_to_angle(90)
+    drive_straight_gyro(90, 600, 50)
+    turn_to_angle(0)
+
+    gobblerClose()
+    while seeBlue == False:
+        if checkColor() == "blue":
+            seeBlue = True
+        drive_straight_gyro(0, 600, 100)
+    
+    PowerGobbler(False)
+
+    drive_straight_gyro(0, -100, 1000)
+    drive_straight_gyro(0, 600, 50)
+    turn_to_angle(-90)
+    drive_straight_gyro(-90, 600, 200)
+    turn_to_angle(0)
+
+    gobblerClose()
+    while seeBlue == False:
+        if checkColor() == "blue":
+            seeBlue = True
+        drive_straight_gyro(0, 600, 100)
+    
+    PowerGobbler(False)
+
+    drive_straight_gyro(0, -100, 1000)
+    drive_straight_gyro(0, -100, 100)
+    turn_to_angle(90)
+    drive_straight_gyro(90, 600, 50)
+    turn_to_angle(0)
+    drive_straight_gyro(0, -100, 100) #geh zu mitte dammit man die function recursibely callen kann
+
+    #TODO: if mit richtigem erzaetzen
+
+    if globalTime.time() < matchEndTime:  # 1 minute 50 seconds
+        midGameLoop()
+    else:
+        endGame()
+
+def endGame():
+    gobblerClose()
+    while seeBlue == False:
+        if checkColor() == "blue":
+            seeBlue = True
+        drive_straight_gyro(0, 600, 100)
+    
+    gobblerOpen()
+    shoot()
+    drive_straight_gyro(0, -100, 1000)  # Zurück zur Wand
+
+# ------------------ Start ------------------ #
+
+ev3.screen.clear()
+ev3.screen.print("Pixy2 bereit!")
+ev3.screen.print("Starte Programm...")
+
+# Turn on Pixy2 lamp for better detection
+pixy2.set_lamp(1, 0)
+
+try:
+    SortStartBalls()
+    ev3.screen.print("Programm beendet")
+except Exception as e:
+    print("Fehler:", str(e))
+    ev3.speaker.beep()
+    ev3.speaker.beep()
+finally:
+    # Turn off Pixy2 lamp when done
+    pixy2.set_lamp(0, 0)
